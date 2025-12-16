@@ -66,7 +66,9 @@ class App(tk.Tk):
             background=[("active", "#0c8f4a"), ("pressed", "#0b7d40")],
             relief=[("pressed", "sunken"), ("!pressed", "flat")],
         )
-        style.configure("Card.TButton", padding=(14, 10), font=("Segoe UI", 11))
+        # Smaller secondary buttons (Home, Browse).
+    
+        style.configure("Card.TButton", padding=(8, 5), font=("Segoe UI", 10))
 
 
 class HomeFrame(ttk.Frame):

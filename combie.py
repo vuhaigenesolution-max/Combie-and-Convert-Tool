@@ -30,7 +30,7 @@ class CombineFrame(ttk.Frame):
         header.pack(fill=tk.X, pady=(10, 20), padx=6)
 
         ttk.Label(header, text="Combine Data", font=("Segoe UI", 16, "bold")).pack(side=tk.LEFT)
-        ttk.Button(header, text="Home", command=lambda: self.controller.show_frame("home"), style="Card.TButton").pack(side=tk.RIGHT)
+        ttk.Button(header, text="Home", width=7, command=lambda: self.controller.show_frame("home"), style="Card.TButton").pack(side=tk.RIGHT)
 
         form = ttk.Frame(self)
         form.pack(fill=tk.BOTH, expand=True, padx=6)
@@ -74,7 +74,7 @@ class CombineFrame(ttk.Frame):
         entry = ttk.Entry(parent, textvariable=variable)
         entry.grid(row=row, column=1, sticky="we", pady=4)
 
-        btn = ttk.Button(parent, text="Browse", command=lambda: browse_callback(variable))
+        btn = ttk.Button(parent, text="Browse", width=7, command=lambda: browse_callback(variable), style="Card.TButton")
         btn.grid(row=row, column=2, sticky="e", pady=4, padx=(8, 0))
 
     def _browse_directory(self, target: tk.StringVar) -> None:
