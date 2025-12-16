@@ -8,6 +8,13 @@ import tkinter as tk
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
+# Ensure backend module is importable when running from Fontend.
+ROOT_DIR = Path(__file__).resolve().parents[1]
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
+
+from Backend.Funtion_Combie_Data import combine_metadata  # type: ignore
+
 
 class CombineFrame(ttk.Frame):
     """Screen for combining data with progress feedback."""
@@ -128,12 +135,11 @@ class CombineFrame(ttk.Frame):
 
     def _combine_worker(self, source: str, template: str, output: str) -> None:
         try:
-            steps = 20
-            for i in range(steps + 1):
-                time.sleep(0.1)
-                progress = (i / steps) * 100
-                self._event_queue.put(("progress", progress))
-
+            # Simple progress hooks: start, run combine, finish.
+            self._event_queue.put(("progress", 10))
+            results = combine_metadata(source, output)
+            # If needed, you can check results/errors here.
+            self._event_queue.put(("progress", 90))
             self._event_queue.put(("done", output))
         except Exception as exc:  # pragma: no cover - defensive UI error handling
             self._event_queue.put(("error", str(exc)))
