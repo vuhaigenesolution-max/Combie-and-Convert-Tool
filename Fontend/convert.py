@@ -1,9 +1,11 @@
+import json
 import os
 import queue
 import sys
 import threading
 import time
 import tkinter as tk
+from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
 
@@ -13,6 +15,7 @@ class ConvertFrame(ttk.Frame):
     def __init__(self, parent: tk.Widget, controller) -> None:
         super().__init__(parent, padding=18)
         self.controller = controller
+        self._settings_path = Path(__file__).resolve().parent / "settings.json"
 
         self.progress_var = tk.DoubleVar(value=0.0)
         self.output_path_var = tk.StringVar()
@@ -24,6 +27,7 @@ class ConvertFrame(ttk.Frame):
         self.input_folder_var = tk.StringVar()
         self.output_var = tk.StringVar()
 
+        self._load_settings()
         self._build_ui()
 
     def _build_ui(self) -> None:
@@ -131,6 +135,12 @@ class ConvertFrame(ttk.Frame):
             messagebox.showwarning("Missing input", "Please provide input and output paths before starting.")
             return
 
+        self._save_settings({
+            "input_file": self.input_file_var.get().strip(),
+            "input_folder": self.input_folder_var.get().strip(),
+            "output": output,
+        })
+
         self.progress_var.set(0)
         self.progress_pct.config(text="0%")
         self.output_path_var.set("")
@@ -214,3 +224,25 @@ class ConvertFrame(ttk.Frame):
                 os.system(f"xdg-open '{path}'")
         except Exception as exc:  # pragma: no cover - defensive UI error handling
             messagebox.showerror("Unable to open", str(exc))
+
+    def _load_settings(self) -> None:
+        try:
+            if not self._settings_path.exists():
+                return
+            data = json.loads(self._settings_path.read_text(encoding="utf-8") or "{}")
+            convert = data.get("convert", {})
+            self.input_file_var.set(convert.get("input_file", ""))
+            self.input_folder_var.set(convert.get("input_folder", ""))
+            self.output_var.set(convert.get("output", ""))
+        except Exception:
+            pass
+
+    def _save_settings(self, convert_data: dict) -> None:
+        try:
+            data = {}
+            if self._settings_path.exists():
+                data = json.loads(self._settings_path.read_text(encoding="utf-8") or "{}")
+            data["convert"] = convert_data
+            self._settings_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        except Exception:
+            pass

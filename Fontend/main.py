@@ -1,8 +1,8 @@
 import tkinter as tk
 from tkinter import ttk
 
-from Fontend.combie import CombineFrame
-from Fontend.convert import ConvertFrame
+from combie import CombineFrame
+from convert import ConvertFrame
 
 
 class App(tk.Tk):

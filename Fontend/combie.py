@@ -1,9 +1,11 @@
+import json
 import os
 import queue
 import sys
 import threading
 import time
 import tkinter as tk
+from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
 
@@ -13,6 +15,7 @@ class CombineFrame(ttk.Frame):
     def __init__(self, parent: tk.Widget, controller) -> None:
         super().__init__(parent, padding=18)
         self.controller = controller
+        self._settings_path = Path(__file__).resolve().parent / "settings.json"
         self.progress_var = tk.DoubleVar(value=0.0)
         self.output_path_var = tk.StringVar()
         self._worker_thread: threading.Thread | None = None
@@ -23,6 +26,7 @@ class CombineFrame(ttk.Frame):
         self.template_var = tk.StringVar()
         self.output_var = tk.StringVar()
 
+        self._load_settings()
         self._build_ui()
 
     def _build_ui(self) -> None:
@@ -102,6 +106,12 @@ class CombineFrame(ttk.Frame):
             messagebox.showwarning("Missing input", "Please provide all paths before starting.")
             return
 
+        self._save_settings({
+            "source": source,
+            "template": template,
+            "output": output,
+        })
+
         self.progress_var.set(0)
         self.progress_pct.config(text="0%")
         self.output_path_var.set("")
@@ -178,3 +188,27 @@ class CombineFrame(ttk.Frame):
                 os.system(f"xdg-open '{path}'")
         except Exception as exc:  # pragma: no cover - defensive UI error handling
             messagebox.showerror("Unable to open", str(exc))
+
+    def _load_settings(self) -> None:
+        try:
+            if not self._settings_path.exists():
+                return
+            data = json.loads(self._settings_path.read_text(encoding="utf-8") or "{}")
+            combine = data.get("combine", {})
+            self.source_var.set(combine.get("source", ""))
+            self.template_var.set(combine.get("template", ""))
+            self.output_var.set(combine.get("output", ""))
+        except Exception:
+            # Silently ignore malformed settings to keep UI usable.
+            pass
+
+    def _save_settings(self, combine_data: dict) -> None:
+        try:
+            data = {}
+            if self._settings_path.exists():
+                data = json.loads(self._settings_path.read_text(encoding="utf-8") or "{}")
+            data["combine"] = combine_data
+            self._settings_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        except Exception:
+            # Ignore save errors; do not block the workflow.
+            pass
