@@ -11,7 +11,7 @@ class CombineFrame(ttk.Frame):
     """Screen for combining data with progress feedback."""
 
     def __init__(self, parent: tk.Widget, controller) -> None:
-        super().__init__(parent)
+        super().__init__(parent, padding=18)
         self.controller = controller
         self.progress_var = tk.DoubleVar(value=0.0)
         self.output_path_var = tk.StringVar()
@@ -27,21 +27,21 @@ class CombineFrame(ttk.Frame):
 
     def _build_ui(self) -> None:
         header = ttk.Frame(self)
-        header.pack(fill=tk.X, pady=(10, 20))
+        header.pack(fill=tk.X, pady=(10, 20), padx=6)
 
         ttk.Label(header, text="Combine Data", font=("Segoe UI", 16, "bold")).pack(side=tk.LEFT)
-        ttk.Button(header, text="Home", command=lambda: self.controller.show_frame("home")).pack(side=tk.RIGHT)
+        ttk.Button(header, text="Home", command=lambda: self.controller.show_frame("home"), style="Card.TButton").pack(side=tk.RIGHT)
 
         form = ttk.Frame(self)
-        form.pack(fill=tk.BOTH, expand=True)
+        form.pack(fill=tk.BOTH, expand=True, padx=6)
 
         self._add_path_selector(form, "Source Folder", self.source_var, self._browse_directory, row=0)
         self._add_path_selector(form, "Output Folder", self.output_var, self._browse_directory, row=1)
         self._add_path_selector(form, "Template File / Folder", self.template_var, self._browse_template, row=2)
 
         action_row = ttk.Frame(form)
-        action_row.grid(row=3, column=0, columnspan=3, pady=(20, 10), sticky="w")
-        self.combine_btn = ttk.Button(action_row, text="Combine Data", command=self._start_combine)
+        action_row.grid(row=3, column=0, columnspan=3, pady=(24, 12), sticky="w")
+        self.combine_btn = ttk.Button(action_row, text="Combine Data", command=self._start_combine, style="Primary.TButton")
         self.combine_btn.pack(side=tk.LEFT)
 
         progress_row = ttk.Frame(form)

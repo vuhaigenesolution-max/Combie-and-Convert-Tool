@@ -16,7 +16,7 @@ class App(tk.Tk):
 
         self._configure_styles()
 
-        container = ttk.Frame(self, padding=20, style="Root.TFrame")
+        container = ttk.Frame(self, padding=28, style="Root.TFrame")
         container.pack(fill=tk.BOTH, expand=True)
 
         self.frames: dict[str, ttk.Frame] = {}
@@ -79,7 +79,7 @@ class HomeFrame(ttk.Frame):
 
         # Hero section
         hero = ttk.Frame(self, style="Root.TFrame")
-        hero.pack(fill=tk.X, pady=(10, 30))
+        hero.pack(fill=tk.X, pady=(10, 30), padx=8)
 
         # icon = ttk.Label(hero, text="🍃", font=("Segoe UI", 38), background="#0c1f2b", foreground="#0fa958")
         # icon.pack()
@@ -92,7 +92,7 @@ class HomeFrame(ttk.Frame):
 
         # Cards for workflows
         cards = ttk.Frame(self, style="Root.TFrame")
-        cards.pack(expand=True)
+        cards.pack(expand=True, fill=tk.BOTH, padx=12)
 
         card = ttk.Frame(cards, padding=20, style="Card.TFrame")
         card.pack(fill=tk.X, expand=True, padx=40, pady=10)
