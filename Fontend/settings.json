@@ -1,7 +1,6 @@
 {
   "combine": {
     "source": "C:/Users/VUDUCHAI/OneDrive - Gene Solutions/Tool Excel Team Bi/Metadata Tool - version 2.0/Metadata Tool/Source",
-    "template": "C:/Users/VUDUCHAI/OneDrive - Gene Solutions/Tool Excel Team Bi/Metadata Tool - version 2.0/Metadata Tool/Template/metadata_TEMPLATE_YYYYMMDD.xlsx",
     "output": "C:/Users/VUDUCHAI/OneDrive - Gene Solutions/Tool Excel Team Bi/Metadata Tool - version 2.0/Metadata Tool/TEST"
   }
 }

@@ -1,299 +1,228 @@
-"""Utilities to combine Excel metadata files by run and date.
+"""Combine Excel workbooks by run name and date.
 
-Flow:
-- Scan source folder for Excel files matching pattern metadata_<RUNNAME>_<YYYYMMDD>[_<SUFFIX>].xlsx.
-- Group files by (RUNNAME, date), ignoring suffix.
-- For each group: read sheet 'Sample', keep rows 1-20 as metadata, row 21 as header (once),
-  append data rows (22+) from all files, and restrict columns to DESIRED_COLUMNS in that order.
-- Write combined file as metadata_<RUNNAME>_<YYYYMMDD>.xlsx with sheet 'Sample'.
+This module builds a combined workbook per (runname, date) group. It is
+designed to support the UI in Fontend/combie.py via ``combine_metadata``.
 """
 
 from __future__ import annotations
 
 import re
+from collections import defaultdict
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Iterable
 
 import pandas as pd
-from openpyxl import load_workbook
-from openpyxl.worksheet.worksheet import Worksheet
 
 
-_PATTERN = re.compile(r"^metadata_(?P<run>.+?)_(?P<date>\d{8})(?:_.+)?\.xlsx$", re.IGNORECASE)
-DESIRED_COLUMNS = [
-	"expNum",
-	"sampleOrder",
-	"LABCODE",
-	"Library By",
-	"Library Date",
-	"Species",
-	"i7 index",
-	"i5 index",
-	"LibraryConc",
-	"LibraryAmp",
-	"Library Protocol",
-	"LRMtemplate",
-	"passedQC",
-	"LANE",
-	"Primers",
-]
+@dataclass(frozen=True)
+class SheetRule:
+    """Configuration for how to merge a specific sheet.
 
-HEADER_ROW_INDEX = 23  # header line for SampleImport
-DATA_START_ROW = HEADER_ROW_INDEX + 1  # data starts at row 24
+    prefix_rows: number of top rows to preserve as-is from the first file.
+    header_row: zero-based index of the row that holds the column headers.
+    """
 
-OUTPUT_COLUMNS = [
-	"Sample_ID",
-	"Sample_Name",
-	"Sample_Plate",
-	"Sample_Well",
-	"Index_Plate_Well",
-	"I7_Index_ID",
-	"index",
-	"I5_Index_ID",
-	"index2",
-	"Sample_Project",
-	"Description",
-]
+    prefix_rows: int
+    header_row: int
 
 
-@dataclass
-class CombineResult:
-	output_path: Path
-	run_name: str
-	run_date: str
-	source_files: List[Path]
-	errors: List[str]
+DEFAULT_RULE = SheetRule(prefix_rows=0, header_row=0)
+SHEET_RULES: dict[str, SheetRule] = {
+    "Sample": SheetRule(prefix_rows=20, header_row=20),
+    "Sample Import": SheetRule(prefix_rows=22, header_row=22),
+}
+
+FILENAME_REGEX = re.compile(r"^metadata_(?P<run>[A-Za-z0-9_-]+)_(?P<date>20\d{6})(?:_.*)?\.xlsx$", re.IGNORECASE)
+# Regex bắt run name và ngày (YYYYMMDD) trong tên file, bỏ qua mọi suffix phía sau.
 
 
-def _safe_mkdir(path: Path) -> None:
-	path.mkdir(parents=True, exist_ok=True)
+def _normalize_run(run: str) -> str:
+    """Chuẩn hóa run name để tránh lặp prefix metadata_ và ký tự thừa."""
+    run = re.sub(r"^metadata_", "", run, flags=re.IGNORECASE)
+    return run.strip(" _-") or "run"
 
 
-def _parse_groups(source_folder: Path) -> dict[tuple[str, str], list[Path]]:
-	"""Group files by (run, date) based on filename pattern."""
-	groups: dict[tuple[str, str], list[Path]] = {}
-	for path in source_folder.glob("*.xlsx"):
-		match = _PATTERN.match(path.name)
-		if not match:
-			continue
-		key = (match.group("run"), match.group("date"))
-		groups.setdefault(key, []).append(path)
-	return groups
+def combine_metadata(source_dir: str | Path, output_dir: str | Path) -> list[Path]:
+    """Combine Excel files grouped by run name and date.
+
+    Rules (per sheet):
+    - Sheet ``Sample``: keep rows 1-20, row 21 is header, append data from row 22+.
+    - Sheet ``Sample Import``: keep rows 1-22, row 23 is header, append data from row 24+.
+    - Other sheets: use first row as header, append data from row 2+.
+
+    Args:
+        source_dir: Folder containing source Excel files.
+        output_dir: Folder to write combined workbooks.
+
+    Returns:
+        List of created output file paths.
+    """
+
+    src_path = Path(source_dir)
+    out_path = Path(output_dir)
+
+    if not src_path.exists():
+        raise FileNotFoundError(f"Source folder not found: {src_path}")
+    out_path.mkdir(parents=True, exist_ok=True)
+
+    files = _find_excel_files(src_path)
+    if not files:
+        raise FileNotFoundError("No Excel files found in source folder.")
+
+    grouped: dict[tuple[str, str], list[Path]] = defaultdict(list)
+    for file in files:
+        key = _group_key(file)
+        grouped[key].append(file)
+
+    outputs: list[Path] = []
+    for (runname, date_key), paths in grouped.items():
+        combined = _combine_group(paths)  # Gộp từng sheet theo rule.
+        norm_run = _normalize_run(runname)
+        safe_runname = re.sub(r"[^A-Za-z0-9_-]+", "_", norm_run).strip("_") or "run"
+        filename = f"metadata_{safe_runname}_{date_key}.xlsx"
+        dest = out_path / filename
+        _write_workbook(dest, combined)
+        outputs.append(dest)
+
+    return outputs
 
 
-def _read_sample_sheet(path: Path) -> Optional[pd.DataFrame]:
-	"""Safely read sheet 'Sample' without headers (managed manually)."""
-	try:
-		return pd.read_excel(path, sheet_name="Sample", header=None, engine="openpyxl")
-	except Exception as exc:  # pragma: no cover - defensive read
-		print(f"[WARN] Failed to read {path.name}: {exc}")
-		return None
+def combine_metadata_by_filename(source_dir: str | Path, output_dir: str | Path) -> list[Path]:
+    """Combine Excel metadata files that follow the pattern metadata_<RUN>_<YYYYMMDD>[_<SUFFIX>].xlsx.
+
+    Files are grouped by (RUN, YYYYMMDD) ignoring any suffix. Each group produces
+    one output file named combined_metadata_<RUN>_<YYYYMMDD>.xlsx. Sheet merging
+    rules are identical to ``combine_metadata``.
+    """
+
+    src_path = Path(source_dir)
+    out_path = Path(output_dir)
+
+    if not src_path.exists():
+        raise FileNotFoundError(f"Source folder not found: {src_path}")
+    out_path.mkdir(parents=True, exist_ok=True)
+
+    grouped: dict[tuple[str, str], list[Path]] = defaultdict(list)
+    for file in src_path.glob("*.xlsx"):
+        if file.name.startswith("~$"):
+            continue
+        match = FILENAME_REGEX.match(file.name)
+        if not match:
+            continue
+        run = _normalize_run(match.group("run"))
+        date_key = match.group("date")
+        grouped[(run, date_key)].append(file)
+
+    if not grouped:
+        raise FileNotFoundError("No matching metadata_<RUN>_<YYYYMMDD>.xlsx files found.")
+
+    outputs: list[Path] = []
+    for (run, date_key), paths in grouped.items():
+        combined = _combine_group(paths)  # Dùng chung logic merge sheet theo rule.
+        safe_run = re.sub(r"[^A-Za-z0-9_-]+", "_", run).strip("_") or "run"
+        dest = out_path / f"metadata_{safe_run}_{date_key}.xlsx"
+        _write_workbook(dest, combined)
+        outputs.append(dest)
+
+    return outputs
 
 
-def _build_header_index(ws: Worksheet, header_row: int) -> Dict[str, int]:
-	"""Map header value to column index for a given row."""
-	headers: Dict[str, int] = {}
-	for idx, cell in enumerate(ws[header_row], start=1):
-		if cell.value is None:
-			continue
-		key = str(cell.value).strip()
-		if key:
-			headers[key] = idx
-	return headers
+def _find_excel_files(folder: Path) -> list[Path]:
+    patterns = ["*.xlsx", "*.xlsm", "*.xls"]
+    files: list[Path] = []
+    for pattern in patterns:
+        files.extend(folder.glob(pattern))
+    return [f for f in files if not f.name.startswith("~$")]
 
 
-def _get_cell(ws: Worksheet, row: int, col: int):
-	return ws.cell(row=row, column=col).value
+def _group_key(path: Path) -> tuple[str, str]:
+    stem = path.stem
+    date_match = re.search(r"(20\d{6})", stem)
+    # Nếu tên không có YYYYMMDD, fallback dùng mtime của file.
+    date_part = date_match.group(1) if date_match else datetime.fromtimestamp(path.stat().st_mtime).strftime("%Y%m%d")
+    run_part = _normalize_run(stem.replace(date_part, "").strip(" _-."))
+    return run_part.lower(), date_part
 
 
-def create_sample_import(workbook_path: str | Path, sheet_name: str = "SampleImport") -> None:
-	"""Create/replace SampleImport sheet inside the same workbook, preserving Sample sheet."""
-	wb = load_workbook(workbook_path)
-	if "Sample" not in wb.sheetnames:
-		raise ValueError("Sheet 'Sample' not found")
+def _combine_group(files: Iterable[Path]) -> dict[str, pd.DataFrame]:
+    files = list(sorted(files))
+    sheet_names = _collect_sheet_names(files)
+    combined: dict[str, pd.DataFrame] = {}
 
-	sample_ws = wb["Sample"]
+    for sheet in sheet_names:
+        rule = SHEET_RULES.get(sheet, DEFAULT_RULE)
+        frames = _load_sheet_frames(files, sheet)
+        if not frames:
+            continue
+        combined[sheet] = _merge_frames(frames, rule)  # Giữ prefix + header, nối data.
 
-	# Replace target sheet if exists.
-	if sheet_name in wb.sheetnames:
-		del wb[sheet_name]
-	ws = wb.create_sheet(sheet_name)
-
-	# Copy first 22 rows (metadata area) from Sample into SampleImport.
-	max_copy_row = min(HEADER_ROW_INDEX - 1, sample_ws.max_row)
-	max_copy_col = sample_ws.max_column
-	for r in range(1, max_copy_row + 1):
-		for c in range(1, max_copy_col + 1):
-			ws.cell(row=r, column=c, value=_get_cell(sample_ws, r, c))
-
-	# Build header map from Sample (assume header at row 21 in Sample).
-	sample_header_row = 21
-	header_index = _build_header_index(sample_ws, sample_header_row)
-
-	# Set B23 = Sample!C14 as requested.
-	ws.cell(row=HEADER_ROW_INDEX, column=2, value=_get_cell(sample_ws, 14, 3))
-
-	# Write column headers at row 23.
-	for col_idx, name in enumerate(OUTPUT_COLUMNS, start=1):
-		ws.cell(row=HEADER_ROW_INDEX, column=col_idx, value=name)
-
-	# Data rows from Sample (row 22 onward in Sample).
-	out_row = DATA_START_ROW
-	max_row = sample_ws.max_row
-	for r in range(sample_header_row + 1, max_row + 1):
-		if all(sample_ws.cell(row=r, column=c).value in (None, "") for c in range(1, sample_ws.max_column + 1)):
-			continue
-
-		def val(col_name: str):
-			idx = header_index.get(col_name)
-			return _get_cell(sample_ws, r, idx) if idx else None
-
-		sample_order = val("sampleOrder")
-		labcode = val("LABCODE")
-		exp_num = val("expNum")
-		i7 = val("i7 index")
-		i5 = val("i5 index")
-		idx1 = val("index")
-		idx2 = val("index2")
-		lane = val("LANE")
-
-		def join_id(a, b):
-			parts = [str(x).strip() for x in (a, b) if x not in (None, "")]
-			return " - ".join(parts) if parts else None
-
-		sample_id = join_id(sample_order, labcode)
-
-		row_values = [
-			sample_id,
-			sample_id,
-			exp_num,
-			None,
-			None,
-			i7,
-			idx1,
-			i5,
-			idx2,
-			lane,
-			None,
-		]
-
-		for c_idx, value in enumerate(row_values, start=1):
-			ws.cell(row=out_row, column=c_idx, value=value)
-		out_row += 1
-
-	wb.save(workbook_path)
+    return combined
 
 
-def combine_metadata(source_folder: str | Path, output_folder: str | Path) -> list[CombineResult]:
-	"""
-	Combine metadata Excel files by Run Name and Run Date.
-
-	- Input files pattern: metadata_<RUNNAME>_<YYYYMMDD>[_<SUFFIX>].xlsx
-	- Grouped by (RUNNAME, YYYYMMDD), ignoring suffix.
-	- Sheet 'Sample' only: rows 1-20 metadata (keep from first file only), row 21 header (once), rows 22+ data (append).
-	- Writes combined_metadata_<RUNNAME>_<YYYYMMDD>.xlsx per group.
-
-	Returns list of CombineResult per written file.
-	"""
-
-	src = Path(source_folder)
-	out = Path(output_folder)
-	_safe_mkdir(out)
-
-	groups = _parse_groups(src)
-	results: list[CombineResult] = []
-
-	if not groups:
-		print(f"[INFO] No matching files in {src}")
-		return results
-
-	for (run_name, run_date), files in groups.items():
-		errors: list[str] = []
-		combined_data_frames: list[pd.DataFrame] = []
-		metadata_rows: Optional[pd.DataFrame] = None
-		header_row: Optional[pd.Series] = None
-
-		for idx, path in enumerate(sorted(files)):
-			df = _read_sample_sheet(path)
-			if df is None:
-				errors.append(f"Read failed: {path.name}")
-				continue
-
-			if df.shape[0] < 21:
-				errors.append(f"Sheet too short (needs >=21 rows): {path.name}")
-				continue
-
-			if idx == 0:
-				metadata_rows = df.iloc[:20].copy()
-				header_row = df.iloc[20].copy()
-
-				# Determine positions of desired headers; keep None where missing to fill with nulls.
-				header_values = [str(v).strip() for v in header_row.tolist()]
-				keep_positions: list[Optional[int]] = []
-				for col_name in DESIRED_COLUMNS:
-					keep_positions.append(header_values.index(col_name) if col_name in header_values else None)
-				if all(pos is None for pos in keep_positions):
-					errors.append(f"No desired columns found in header: {path.name}")
-					continue
-			# If we did not find keep_positions, skip this file.
-			if metadata_rows is None or header_row is None:
-				continue
-
-			data_rows = df.iloc[21:]
-			# Build aligned data frame with fixed columns; missing columns filled with NA.
-			aligned_cols = []
-			for pos in keep_positions:
-				if pos is None:
-					aligned_cols.append(pd.Series([pd.NA] * len(data_rows), index=data_rows.index))
-				else:
-					aligned_cols.append(data_rows.iloc[:, pos])
-			aligned_df = pd.concat(aligned_cols, axis=1)
-			aligned_df.columns = DESIRED_COLUMNS
-			combined_data_frames.append(aligned_df)
-
-		if not combined_data_frames or metadata_rows is None or header_row is None:
-			print(f"[WARN] No valid data for group {run_name} {run_date}; skipped")
-			continue
-
-		combined_data = pd.concat(combined_data_frames, ignore_index=True)
-
-		# Build final DataFrame: metadata (trimmed/fill null), header (fixed), then data (aligned).
-		meta_cols = []
-		for pos in keep_positions:
-			if pos is None:
-				meta_cols.append(pd.Series([pd.NA] * len(metadata_rows), index=metadata_rows.index))
-			else:
-				meta_cols.append(metadata_rows.iloc[:, pos])
-		metadata_trimmed = pd.concat(meta_cols, axis=1)
-		metadata_trimmed.columns = DESIRED_COLUMNS
-
-		header_as_df = pd.DataFrame([DESIRED_COLUMNS])
-
-		final_df = pd.concat([metadata_trimmed, header_as_df, combined_data], ignore_index=True)
-
-		output_name = f"metadata_{run_name}_{run_date}.xlsx"
-		output_path = out / output_name
-
-		try:
-			final_df.to_excel(output_path, index=False, header=False, sheet_name="Sample", engine="openpyxl")
-		except Exception as exc:  # pragma: no cover - defensive write
-			print(f"[ERROR] Failed to write {output_name}: {exc}")
-			errors.append(f"Write failed: {exc}")
-			continue
-
-		# Append SampleImport sheet after Sample is written.
-		try:
-			create_sample_import(output_path, sheet_name="SampleImport")
-		except Exception as exc:  # pragma: no cover - defensive sheet creation
-			msg = f"Create SampleImport failed for {output_name}: {exc}"
-			print(f"[WARN] {msg}")
-			errors.append(msg)
-
-		results.append(CombineResult(output_path=output_path, run_name=run_name, run_date=run_date, source_files=sorted(files), errors=errors))
-		print(f"[INFO] Wrote {output_path} (Sample + SampleImport)")
-
-	return results
+def _collect_sheet_names(files: list[Path]) -> set[str]:
+    names: set[str] = set()
+    for file in files:
+        try:
+            xls = pd.ExcelFile(file)
+            names.update(xls.sheet_names)
+        except Exception:
+            continue
+    return names
 
 
-__all__ = ["combine_metadata", "CombineResult"]
+def _load_sheet_frames(files: list[Path], sheet: str) -> list[pd.DataFrame]:
+    frames: list[pd.DataFrame] = []
+    for file in files:
+        try:
+            df = pd.read_excel(file, sheet_name=sheet, header=None, dtype=object)
+            frames.append(df)
+        except ValueError:
+            # Sheet missing in this file; skip.
+            continue
+    return frames
+
+
+def _merge_frames(frames: list[pd.DataFrame], rule: SheetRule) -> pd.DataFrame:
+    base = frames[0]
+    if base.empty:
+        return base
+
+    header_idx = rule.header_row
+    prefix_rows = rule.prefix_rows
+    if header_idx >= len(base.index):
+        raise ValueError(f"Header row {header_idx + 1} missing in sheet")
+
+    prefix = base.iloc[:prefix_rows].copy() if prefix_rows else pd.DataFrame()
+    header_row = base.iloc[header_idx]
+    base_cols = header_row.index
+    data_start = header_idx + 1
+
+    data_parts: list[pd.DataFrame] = []
+    for frame in frames:
+        if data_start > len(frame.index):
+            continue
+        part = frame.iloc[data_start:].copy()
+        part = part.reindex(columns=base_cols)
+        part = part.dropna(how="all")
+        data_parts.append(part)
+
+    merged_data = pd.concat(data_parts, ignore_index=True) if data_parts else pd.DataFrame(columns=base_cols)
+
+    result = pd.concat(
+        [
+            prefix,
+            pd.DataFrame([header_row]).reindex(columns=base_cols),
+            merged_data,
+        ],
+        ignore_index=True,
+    )
+
+    return result
+
+
+def _write_workbook(dest: Path, sheets: dict[str, pd.DataFrame]) -> None:
+    with pd.ExcelWriter(dest, engine="openpyxl") as writer:
+        for name, df in sheets.items():
+            df.to_excel(writer, sheet_name=name, index=False, header=False)
