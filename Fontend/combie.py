@@ -28,6 +28,7 @@ class CombineFrame(ttk.Frame):
         self._worker_thread: threading.Thread | None = None
         self._event_queue: queue.Queue[tuple[str, float | str]] = queue.Queue()
         self._running = False
+        self._spinner_job: str | None = None
 
         self.source_var = tk.StringVar()
         self.template_var = tk.StringVar()
@@ -59,17 +60,16 @@ class CombineFrame(ttk.Frame):
         progress_row.grid(row=4, column=0, columnspan=3, pady=(10, 10), sticky="we")
         form.columnconfigure(1, weight=1)
         ttk.Label(progress_row, text="Progress:").pack(side=tk.LEFT, padx=(0, 8))
-        self.progress = ttk.Progressbar(progress_row, variable=self.progress_var, maximum=100)
+        self.progress = ttk.Progressbar(progress_row, variable=self.progress_var, maximum=100, mode="determinate")
         self.progress.pack(side=tk.LEFT, fill=tk.X, expand=True)
         self.progress_pct = ttk.Label(progress_row, text="0%")
         self.progress_pct.pack(side=tk.LEFT, padx=(8, 0))
 
         result_row = ttk.Frame(form)
         result_row.grid(row=5, column=0, columnspan=3, pady=(20, 0), sticky="we")
-        ttk.Label(result_row, text="Output:").pack(side=tk.LEFT, padx=(0, 8))
-        self.output_path_display = ttk.Entry(result_row, textvariable=self.output_path_var, state="readonly")
-        self.output_path_display.pack(side=tk.LEFT, fill=tk.X, expand=True)
-        ttk.Button(result_row, text="Open Output Folder", command=self._open_output_folder).pack(side=tk.LEFT, padx=(8, 0))
+        self.open_btn = ttk.Button(result_row, text="Open Output Folder", style="Primary.TButton", command=self._open_output_folder)
+        self.open_btn.pack(side=tk.LEFT, padx=(0, 0))
+        self.open_btn.pack_forget()  # Ẩn cho đến khi hoàn tất
 
     def _add_path_selector(
         self,
@@ -122,6 +122,7 @@ class CombineFrame(ttk.Frame):
         self.output_path_var.set("")
         self._running = True
         self.combine_btn.state(["disabled"])
+        self._tick_progress()
 
         self._worker_thread = threading.Thread(
             target=self._combine_worker,
@@ -166,9 +167,21 @@ class CombineFrame(ttk.Frame):
         self._running = False
         self.combine_btn.state(["!disabled"])
         if success:
+            self.open_btn.pack(side=tk.LEFT, padx=(0, 0))
+        if success:
             messagebox.showinfo("Success", message)
         else:
             messagebox.showerror("Error", message)
+
+    def _tick_progress(self) -> None:
+        if not self._running:
+            return
+        current = self.progress_var.get()
+        # Nhích chậm hơn: +1% mỗi 0.6s cho đến 90%; worker sẽ đặt 100% khi xong.
+        if current < 90:
+            self.progress_var.set(min(current + 1, 90))
+            self.progress_pct.config(text=f"{self.progress_var.get():.0f}%")
+        self.after(1000, self._tick_progress)
 
     def _open_output_folder(self) -> None:
         path = self.output_path_var.get()
