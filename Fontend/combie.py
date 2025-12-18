@@ -181,7 +181,7 @@ class CombineFrame(ttk.Frame):
         if current < 90:
             self.progress_var.set(min(current + 1, 90))
             self.progress_pct.config(text=f"{self.progress_var.get():.0f}%")
-        self.after(1000, self._tick_progress)
+        self.after(600, self._tick_progress)
 
     def _open_output_folder(self) -> None:
         path = self.output_path_var.get()
