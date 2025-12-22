@@ -1,77 +1,101 @@
-"""Các bước logic cho chức năng combine (bổ sung dần từng bước).
-
-Logic 1: nhận đường dẫn nguồn (source) từ màn hình Combine.
-"""
-
 from __future__ import annotations
 
 from pathlib import Path
-import shutil
 import re
-import pandas as pd
+from typing import Dict, List, Tuple
+from openpyxl import load_workbook
+from openpyxl.worksheet.worksheet import Worksheet
 
-
-def get_source_path(source_dir: str | Path) -> Path:
-    """Logic 1: lấy và kiểm tra đường dẫn source do UI truyền xuống.
-
-    - Nhận `source_dir` từ màn hình Combine (combie.py).
-    - Trả về Path đã được chuẩn hóa.
-    - Nếu không tồn tại, ném FileNotFoundError để UI hiển thị lỗi.
-    """
-
-    src = Path(source_dir)
-    if not src.exists():
-        raise FileNotFoundError(f"Source folder not found: {src}")
-    return src
-
-
-__all__ = ["get_source_path"]
-
-
-# ------------------------------
-# Logic 2: tìm và nhóm file metadata theo RUN + YYYYMMDD, bỏ qua hậu tố.
-# ------------------------------
-
-# Mẫu tên: metadata_<RUN>_<YYYYMMDD>[_suffix].xlsx
+# Filename pattern: metadata_RUNNAME_YYYYMMDD.xlsx or metadata_RUNNAME_YYYYMMDD_xxx.xlsx
 FILENAME_REGEX = re.compile(r"^metadata_(?P<run>[A-Za-z0-9_-]+)_(?P<date>20\d{6})(?:_.*)?\.xlsx$", re.IGNORECASE)
 
+# Source sheet & positions (1-based Excel rows/cols)
+SOURCE_SHEET = "Sample"
+IMPORT_SHEET = "SampleImport"
+AVITI_SHEET = "Aviti Manifest"
+AVITI_TEST_SHEET = "Aviti Manifest TEST"
+SAMPLE_START_ROW = 22  # data starts on Sample sheet
+IMPORT_START_ROW = 24  # data starts on SampleImport sheet
+AVITI_START_ROW = 16  # data starts on Aviti Manifest sheet
+AVITI_TEST_START_ROW = 24  # data starts on Aviti Manifest TEST sheet
 
-def find_metadata_files(source_dir: Path) -> list[Path]:
-    """Quét thư mục, lấy danh sách file metadata hợp lệ; báo lỗi nếu tên sai.
 
-    - Hợp lệ: metadata_<RUN>_<YYYYMMDD>[_suffix].xlsx
-    - Bỏ qua file tạm bắt đầu bằng ~$.
-    - Nếu có file sai định dạng, ném ValueError kèm danh sách tên sai.
-    """
+def _sampleimport_col_k_formula(sample_row: int) -> str:
+    # Build nested IF per business rules, referencing Sample sheet row.
+    return (
+        f"=IF(AND(OR(LEFT(Sample!A{sample_row},1)=\"E\",LEFT(Sample!A{sample_row},1)=\"H\",LEFT(Sample!A{sample_row},1)=\"T\","  # TS1
+        f"LEFT(Sample!A{sample_row},1)=\"B\",LEFT(Sample!A{sample_row},2)=\"ID\"),"
+        f"OR(LEFT(Sample!C{sample_row},2)=\"JI\",LEFT(Sample!C{sample_row},1)=\"I\")),\"TS1\"," 
+        f"IF(AND(OR(LEFT(Sample!A{sample_row},1)=\"E\",LEFT(Sample!A{sample_row},1)=\"H\",LEFT(Sample!A{sample_row},1)=\"T\","  # TS95
+        f"LEFT(Sample!A{sample_row},1)=\"B\",LEFT(Sample!A{sample_row},2)=\"ID\"),"
+        f"OR(LEFT(Sample!C{sample_row},2)=\"JX\",LEFT(Sample!C{sample_row},2)=\"JW\",LEFT(Sample!C{sample_row},1)=\"X\")),\"TS95\"," 
+        f"IF(AND(OR(LEFT(Sample!A{sample_row},1)=\"E\",LEFT(Sample!A{sample_row},1)=\"H\",LEFT(Sample!A{sample_row},1)=\"T\","  # TS3
+        f"LEFT(Sample!A{sample_row},1)=\"B\",LEFT(Sample!A{sample_row},2)=\"ID\"),"
+        f"OR(LEFT(Sample!C{sample_row},2)=\"JN\",LEFT(Sample!C{sample_row},1)=\"N\")),\"TS3\"," 
+        f"IF(AND(OR(LEFT(Sample!A{sample_row},1)=\"E\",LEFT(Sample!A{sample_row},1)=\"H\",LEFT(Sample!A{sample_row},1)=\"T\","  # TS24
+        f"LEFT(Sample!A{sample_row},1)=\"B\",LEFT(Sample!A{sample_row},2)=\"ID\"),"
+        f"OR(LEFT(Sample!C{sample_row},2)=\"JA\",LEFT(Sample!C{sample_row},2)=\"AA\",LEFT(Sample!C{sample_row},2)=\"JS\",LEFT(Sample!C{sample_row},2)=\"SA\")),\"TS24\"," 
+        f"IF(AND(OR(LEFT(Sample!A{sample_row},1)=\"T\",LEFT(Sample!A{sample_row},1)=\"B\"),LEFT(Sample!C{sample_row},2)=\"AS\"),\"TSPRO\","  # TSPRO (AS)
+        f"IF(AND(OR(LEFT(Sample!A{sample_row},1)=\"T\",LEFT(Sample!A{sample_row},1)=\"B\",LEFT(Sample!A{sample_row},1)=\"E\",LEFT(Sample!A{sample_row},1)=\"H\"),"
+        f"LEFT(Sample!C{sample_row},4)=\"SERA\"),\"TSPRO\","  # TSPRO (SERA)
+        f"IF(LEFT(Sample!A{sample_row},2)=\"CR\",\"CARRIER9\",IF(LEFT(Sample!A{sample_row},4)=\"DEL3\",\"NIPTDEL3\",Sample!A{sample_row}))))))))"  # default
+    )
 
-    files: list[Path] = []
-    invalid: list[str] = []
-    for path in source_dir.glob("*.xlsx"):
+# Column mapping (source → template)
+# Excel letters to letters; we’ll convert to column indices when writing.
+COLUMN_MAP = {
+    "A": "A",  # expNum
+    "B": "B",  # sampleOrder
+    "C": "C",  # LABCODE
+    "D": "D",  # SeqType
+    "E": "E",  # Harvest kit
+    "F": "F",  # Harvest By
+    "G": "G",  # Harvest Date
+    "H": "H",  # Library By
+    "I": "I",  # Library Date
+    "J": "J",  # Species
+    "K": "K",  # i7 index
+    "L": "L",  # i5 index
+    "M": "M",  # LibraryConc
+    "N": "N",  # LibraryAmp
+    "O": "O",  # Library Protocol
+    "P": "P",  # LRMtemplate
+    "Q": "Q",  # passedQC
+    "R": "R",  # LANE
+    "S": "S",  # TE 0.1X
+    "T": "T",  # Primers
+    "U": "U",  # Notes
+}
+CHECK_PRIMERS_COL = "V"
+CHECK_LABCODES_COL = "W"
+
+
+def _validate_inputs(source_folder: str, output_folder: str, template_file: str) -> Tuple[Path, Path, Path]:
+    src = Path(source_folder)
+    out = Path(output_folder)
+    tpl = Path(template_file)
+
+    if not src.exists() or not src.is_dir():
+        raise FileNotFoundError(f"Source folder not found: {src}")
+    if not tpl.exists() or not tpl.is_file():
+        raise FileNotFoundError(f"Template file not found: {tpl}")
+
+    out.mkdir(parents=True, exist_ok=True)
+    return src, out, tpl
+
+
+def _iter_metadata_files(src: Path) -> List[Path]:
+    files: List[Path] = []
+    for path in src.glob("*.xlsx"):
         if path.name.startswith("~$"):
-            continue  # file tạm của Excel
+            continue  # skip Excel temp files
         if FILENAME_REGEX.match(path.name):
             files.append(path)
-        else:
-            invalid.append(path.name)
-
-    if invalid:
-        raise ValueError(
-            "Các file không đúng định dạng metadata_<RUN>_<YYYYMMDD>[_suffix].xlsx: "
-            + ", ".join(invalid)
-        )
-
     return files
 
 
-def group_by_run_date(files: list[Path]) -> dict[tuple[str, str], list[Path]]:
-    """Nhóm các file theo (run, date) bất kể hậu tố phía sau.
-
-    - run lấy từ nhóm (?P<run>)
-    - date lấy từ nhóm (?P<date>) dạng YYYYMMDD
-    - hậu tố (nếu có) bị bỏ qua, miễn là cùng run + date thì chung nhóm
-    """
-
-    groups: dict[tuple[str, str], list[Path]] = {}
+def _group_by_run_date(files: List[Path]) -> Dict[Tuple[str, str], List[Path]]:
+    groups: Dict[Tuple[str, str], List[Path]] = {}
     for f in files:
         m = FILENAME_REGEX.match(f.name)
         if not m:
@@ -81,181 +105,236 @@ def group_by_run_date(files: list[Path]) -> dict[tuple[str, str], list[Path]]:
     return groups
 
 
-__all__.extend([
-    "find_metadata_files",
-    "group_by_run_date",
-])
+def _read_sample_rows(path: Path) -> List[Dict[str, object]]:
+    wb = load_workbook(path, data_only=False, read_only=True)
+    if SOURCE_SHEET not in wb.sheetnames:
+        wb.close()
+        return []
+    ws: Worksheet = wb[SOURCE_SHEET]
+
+    rows: List[Dict[str, object]] = []
+    for row in ws.iter_rows(min_row=SAMPLE_START_ROW):
+        # stop when LABCODE (col C) is empty; this matches “đến hết labcode thì thôi”
+        if len(row) >= 3:
+            labcode_val = row[2].value  # column C
+            if labcode_val is None or (isinstance(labcode_val, str) and labcode_val.strip() == ""):
+                break
+        record: Dict[str, object] = {}
+        for col_letter in COLUMN_MAP.keys():
+            col_idx = _col_letter_to_index(col_letter) - 1  # zero-based index in row tuple
+            if col_idx < len(row):
+                record[col_letter] = row[col_idx].value
+            else:
+                record[col_letter] = None
+        rows.append(record)
+    wb.close()
+    return rows
 
 
-# ------------------------------
-# Logic 3: tạo tên file đầu ra và thư mục đích.
-# ------------------------------
-
-
-def get_output_path(output_dir: str | Path) -> Path:
-    """Kiểm tra/thạo thư mục đích, trả về Path."""
-
-    out = Path(output_dir)
-    out.mkdir(parents=True, exist_ok=True)
-    return out
-
-
-def build_output_filename(run: str, date: str) -> str:
-    """Ghép tên file đầu ra: metadata_<run>_<YYYYMMDD>.xlsx"""
-
-    return f"metadata_{run}_{date}.xlsx"
-
-
-def plan_outputs(source_dir: str | Path, output_dir: str | Path) -> list[Path]:
-    """Từ thư mục nguồn, xác định các nhóm (run, date) và tên file output.
-
-    - Đọc source_dir, lấy file metadata hợp lệ.
-    - Nhóm theo (run, date) bất kể hậu tố.
-    - Tạo danh sách đường dẫn output tương ứng dưới output_dir.
-    - Chưa gộp nội dung, chỉ trả về kế hoạch tên file đầu ra.
-    """
-
-    src = get_source_path(source_dir)
-    out = get_output_path(output_dir)
-    files = find_metadata_files(src)
-    groups = group_by_run_date(files)
-
-    outputs: list[Path] = []
-    for (run, date), _paths in groups.items():
-        outputs.append(out / build_output_filename(run, date))
-    return outputs
-
-
-__all__.extend([
-    "get_output_path",
-    "build_output_filename",
-    "plan_outputs",
-])
-
-
-# ------------------------------
-# Logic 4: gộp file theo nhóm run/date và lưu vào output.
-# ------------------------------
-
-# Rule sheet: Sample giữ dòng 1-20, header dòng 21, data từ dòng 22; Sample Import giữ dòng 1-22, header dòng 23, data từ dòng 24; sheet khác: header dòng 1, data từ dòng 2.
-SHEET_RULES = {
-    "Sample": {"prefix": 20, "header": 20},
-    "Sample Import": {"prefix": 22, "header": 22},
-}
-
-
-def _collect_sheet_names(files: list[Path]) -> set[str]:
-    names: set[str] = set()
-    for f in files:
-        try:
-            xl = pd.ExcelFile(f)
-            names.update(xl.sheet_names)
-        except Exception:
-            continue
-    return names
-
-
-def _load_sheet_frames(files: list[Path], sheet: str) -> list[pd.DataFrame]:
-    frames: list[pd.DataFrame] = []
-    for f in files:
-        try:
-            df = pd.read_excel(f, sheet_name=sheet, header=None, dtype=object)
-            frames.append(df)
-        except ValueError:
-            continue
-    return frames
-
-
-def _merge_frames(frames: list[pd.DataFrame], sheet: str) -> pd.DataFrame:
-    rule = SHEET_RULES.get(sheet, {"prefix": 0, "header": 0})
-    prefix_rows = rule["prefix"]
-    header_idx = rule["header"]
-
-    base = frames[0]
-    if header_idx >= len(base.index):
-        raise ValueError(f"Sheet {sheet}: thiếu dòng header (vị trí {header_idx + 1})")
-
-    prefix = base.iloc[:prefix_rows].copy() if prefix_rows else pd.DataFrame()
-    header_row = base.iloc[header_idx]
-    cols = header_row.index
-    data_start = header_idx + 1
-
-    parts: list[pd.DataFrame] = []
-    for fr in frames:
-        if data_start > len(fr.index):
-            continue
-        part = fr.iloc[data_start:].copy()
-        part = part.reindex(columns=cols)
-        part = part.dropna(how="all")
-        parts.append(part)
-
-    merged_data = pd.concat(parts, ignore_index=True) if parts else pd.DataFrame(columns=cols)
-
-    if sheet == "Sample":
-        # Bỏ dòng trống ở cả expNum và LABCODE
-        header_map = {str(v).strip(): c for c, v in header_row.items() if str(v).strip()}
-        exp_col = header_map.get("expNum")
-        lab_col = header_map.get("LABCODE")
-        if exp_col in merged_data.columns and lab_col in merged_data.columns:
-            def _non_empty(series: pd.Series) -> pd.Series:
-                return series.notna() & (series.astype(str).str.strip() != "")
-            mask = _non_empty(merged_data[exp_col]) & _non_empty(merged_data[lab_col])
-            merged_data = merged_data[mask].reset_index(drop=True)
-
-    if sheet == "Sample Import":
-        # Bỏ dòng có Sample_ID trống hoặc chỉ là "-"
-        header_map = {str(v).strip(): c for c, v in header_row.items() if str(v).strip()}
-        sample_col = header_map.get("Sample_ID")
-        if sample_col in merged_data.columns:
-            def _valid(series: pd.Series) -> pd.Series:
-                s = series.astype(str).str.strip()
-                return series.notna() & (s != "") & (s != "-")
-            merged_data = merged_data[_valid(merged_data[sample_col])].reset_index(drop=True)
-
-    result = pd.concat([prefix, pd.DataFrame([header_row]).reindex(columns=cols), merged_data], ignore_index=True)
+def _col_letter_to_index(letter: str) -> int:
+    """Convert Excel column letter (A=1) to index."""
+    result = 0
+    for ch in letter.upper():
+        result = result * 26 + (ord(ch) - ord("A") + 1)
     return result
 
 
-def _write_workbook(dest: Path, sheets: dict[str, pd.DataFrame]) -> None:
-    with pd.ExcelWriter(dest, engine="openpyxl") as writer:
-        for name, df in sheets.items():
-            df.to_excel(writer, sheet_name=name, index=False, header=False)
+def _index_from_letter(letter: str) -> int:
+    """Excel letter to 1-based column number."""
+    return _col_letter_to_index(letter)
 
 
-def combine_metadata_by_filename(source_dir: str | Path, output_dir: str | Path) -> list[Path]:
-    """Gộp các file metadata cùng run/date và lưu vào output đã chọn.
+def _compute_duplicates(rows: List[Dict[str, object]]) -> Tuple[set, set]:
+    primers_count: Dict[str, int] = {}
+    labcode_count: Dict[str, int] = {}
 
-    - Nhóm theo (RUN, YYYYMMDD) bỏ qua hậu tố.
-    - Với mỗi nhóm: gộp sheet theo rule (Sample, Sample Import, sheet khác append theo header dòng đầu).
-    - Xuất 1 file duy nhất: metadata_<RUN>_<YYYYMMDD>.xlsx trong thư mục output do UI chọn.
+    def _bump(counter: Dict[str, int], val: object):
+        if val is None:
+            return
+        s = str(val).strip()
+        if s == "":
+            return
+        counter[s] = counter.get(s, 0) + 1
+
+    for r in rows:
+        _bump(primers_count, r.get("T"))  # Primers
+        _bump(labcode_count, r.get("C"))  # LABCODE
+
+    dup_primers = {k for k, v in primers_count.items() if v > 1}
+    dup_labcodes = {k for k, v in labcode_count.items() if v > 1}
+    return dup_primers, dup_labcodes
+
+
+def _write_group(run: str, date: str, rows: List[Dict[str, object]], template_file: Path, output_dir: Path) -> Path:
+    # Fresh load of template to avoid touching the original
+    wb = load_workbook(template_file, data_only=False)
+    if SOURCE_SHEET not in wb.sheetnames:
+        wb.close()
+        raise ValueError(f"Template missing sheet: {SOURCE_SHEET}")
+    if IMPORT_SHEET not in wb.sheetnames:
+        wb.close()
+        raise ValueError(f"Template missing sheet: {IMPORT_SHEET}")
+    if AVITI_SHEET not in wb.sheetnames:
+        wb.close()
+        raise ValueError(f"Template missing sheet: {AVITI_SHEET}")
+    if AVITI_TEST_SHEET not in wb.sheetnames:
+        wb.close()
+        raise ValueError(f"Template missing sheet: {AVITI_TEST_SHEET}")
+
+    sample_ws: Worksheet = wb[SOURCE_SHEET]
+    import_ws: Worksheet = wb[IMPORT_SHEET]
+    aviti_ws: Worksheet = wb[AVITI_SHEET]
+    aviti_test_ws: Worksheet = wb[AVITI_TEST_SHEET]
+
+    dup_primers, dup_labcodes = _compute_duplicates(rows)
+
+    sample_start_row = SAMPLE_START_ROW
+    import_start_row = IMPORT_START_ROW
+    aviti_start_row = AVITI_START_ROW
+    aviti_test_start_row = AVITI_TEST_START_ROW
+
+    for offset, record in enumerate(rows):
+        sample_row = sample_start_row + offset
+        import_row = import_start_row + offset
+        aviti_row = aviti_start_row + offset
+        aviti_test_row = aviti_test_start_row + offset
+        # Write mapped columns on Sample sheet
+        for src_col, dst_col in COLUMN_MAP.items():
+            val = record.get(src_col)
+            sample_ws.cell(row=sample_row, column=_index_from_letter(dst_col)).value = val
+
+        # Fill formula in col K to lookup i7 index from Primers (col T)
+        sample_ws.cell(row=sample_row, column=_index_from_letter("K")).value = (
+            f"=VLOOKUP(T{sample_row},'Index Sets'!$A$2:$C$4000,2,FALSE)"
+        )
+
+        # SampleImport formulas
+        import_ws.cell(row=import_row, column=_index_from_letter("A")).value = (
+            f"=Sample!B{sample_row}&\"-\"&Sample!C{sample_row}"
+        )
+        import_ws.cell(row=import_row, column=_index_from_letter("B")).value = (
+            f"=Sample!B{sample_row}&\"-\"&Sample!C{sample_row}"
+        )
+        import_ws.cell(row=import_row, column=_index_from_letter("C")).value = (
+            f"=Sample!A{sample_row}"
+        )
+        import_ws.cell(row=import_row, column=_index_from_letter("F")).value = (
+            f"=Sample!K{sample_row}"
+        )
+        import_ws.cell(row=import_row, column=_index_from_letter("G")).value = (
+            f"=VLOOKUP(F{import_row},'Index Sequence'!$A$2:$B$10000,2,FALSE)"
+        )
+        import_ws.cell(row=import_row, column=_index_from_letter("H")).value = (
+            f"=Sample!L{sample_row}"
+        )
+        import_ws.cell(row=import_row, column=_index_from_letter("I")).value = (
+            f"=VLOOKUP(H{import_row},'Index Sequence'!$A$2:$B$10000,2,FALSE)"
+        )
+        import_ws.cell(row=import_row, column=_index_from_letter("K")).value = _sampleimport_col_k_formula(sample_row)
+
+        # Aviti Manifest formulas
+        aviti_ws.cell(row=aviti_row, column=_index_from_letter("A")).value = (
+            f"=SampleImport!A{import_row}"
+        )
+        aviti_ws.cell(row=aviti_row, column=_index_from_letter("B")).value = (
+            f"=SampleImport!G{import_row}"
+        )
+        # Reverse string in SampleImport col I (positions 1..30) into Aviti col C
+        aviti_ws.cell(row=aviti_row, column=_index_from_letter("C")).value = (
+            f"=MID(I{aviti_row},30,1)&MID(I{aviti_row},29,1)&MID(I{aviti_row},28,1)&MID(I{aviti_row},27,1)&"
+            f"MID(I{aviti_row},26,1)&MID(I{aviti_row},25,1)&MID(I{aviti_row},24,1)&MID(I{aviti_row},23,1)&"
+            f"MID(I{aviti_row},22,1)&MID(I{aviti_row},21,1)&MID(I{aviti_row},20,1)&MID(I{aviti_row},19,1)&"
+            f"MID(I{aviti_row},18,1)&MID(I{aviti_row},17,1)&MID(I{aviti_row},16,1)&MID(I{aviti_row},15,1)&"
+            f"MID(I{aviti_row},14,1)&MID(I{aviti_row},13,1)&MID(I{aviti_row},12,1)&MID(I{aviti_row},11,1)&"
+            f"MID(I{aviti_row},10,1)&MID(I{aviti_row},9,1)&MID(I{aviti_row},8,1)&MID(I{aviti_row},7,1)&"
+            f"MID(I{aviti_row},6,1)&MID(I{aviti_row},5,1)&MID(I{aviti_row},4,1)&MID(I{aviti_row},3,1)&"
+            f"MID(I{aviti_row},2,1)&MID(I{aviti_row},1,1)"
+        )
+        aviti_ws.cell(row=aviti_row, column=_index_from_letter("D")).value = (
+            f"=SampleImport!K{import_row}"
+        )
+        aviti_ws.cell(row=aviti_row, column=_index_from_letter("I")).value = (
+            f"=SUBSTITUTE(SUBSTITUTE(SUBSTITUTE(SUBSTITUTE(SUBSTITUTE(SUBSTITUTE(SUBSTITUTE(SUBSTITUTE(SampleImport!I{import_row},\"A\",1),\"C\",2),\"G\",3),\"T\",4),1,\"T\"),2,\"G\"),3,\"C\"),4,\"A\")"
+        )
+
+        # Aviti Manifest TEST formulas (start row 24)
+        aviti_test_ws.cell(row=aviti_test_row, column=_index_from_letter("A")).value = (
+            f"=Sample!B{sample_row}&\"-\"&Sample!C{sample_row}"
+        )
+        aviti_test_ws.cell(row=aviti_test_row, column=_index_from_letter("B")).value = (
+            f"=Sample!B{sample_row}&\"-\"&Sample!C{sample_row}"
+        )
+        aviti_test_ws.cell(row=aviti_test_row, column=_index_from_letter("C")).value = (
+            f"=Sample!A{sample_row}"
+        )
+        aviti_test_ws.cell(row=aviti_test_row, column=_index_from_letter("F")).value = (
+            f"=Sample!K{sample_row}"
+        )
+        aviti_test_ws.cell(row=aviti_test_row, column=_index_from_letter("G")).value = (
+            f"=VLOOKUP(F{aviti_test_row},'Index Sequence'!$A$2:$B$9808,2,FALSE)"
+        )
+        aviti_test_ws.cell(row=aviti_test_row, column=_index_from_letter("H")).value = (
+            f"=Sample!L{sample_row}"
+        )
+        # O column depends on SampleImport col I
+        aviti_test_ws.cell(row=aviti_test_row, column=_index_from_letter("O")).value = (
+            f"=SUBSTITUTE(SUBSTITUTE(SUBSTITUTE(SUBSTITUTE(SUBSTITUTE(SUBSTITUTE(SUBSTITUTE(SUBSTITUTE(SampleImport!I{import_row},\"A\",1),\"C\",2),\"G\",3),\"T\",4),1,\"T\"),2,\"G\"),3,\"C\"),4,\"A\")"
+        )
+        aviti_test_ws.cell(row=aviti_test_row, column=_index_from_letter("I")).value = (
+            f"=MID(O{aviti_test_row},30,1)&MID(O{aviti_test_row},29,1)&MID(O{aviti_test_row},28,1)&MID(O{aviti_test_row},27,1)&"
+            f"MID(O{aviti_test_row},26,1)&MID(O{aviti_test_row},25,1)&MID(O{aviti_test_row},24,1)&MID(O{aviti_test_row},23,1)&"
+            f"MID(O{aviti_test_row},22,1)&MID(O{aviti_test_row},21,1)&MID(O{aviti_test_row},20,1)&MID(O{aviti_test_row},19,1)&"
+            f"MID(O{aviti_test_row},18,1)&MID(O{aviti_test_row},17,1)&MID(O{aviti_test_row},16,1)&MID(O{aviti_test_row},15,1)&"
+            f"MID(O{aviti_test_row},14,1)&MID(O{aviti_test_row},13,1)&MID(O{aviti_test_row},12,1)&MID(O{aviti_test_row},11,1)&"
+            f"MID(O{aviti_test_row},10,1)&MID(O{aviti_test_row},9,1)&MID(O{aviti_test_row},8,1)&MID(O{aviti_test_row},7,1)&"
+            f"MID(O{aviti_test_row},6,1)&MID(O{aviti_test_row},5,1)&MID(O{aviti_test_row},4,1)&MID(O{aviti_test_row},3,1)&"
+            f"MID(O{aviti_test_row},2,1)&MID(O{aviti_test_row},1,1)"
+        )
+
+        primers_val = record.get("T")
+        labcode_val = record.get("C")
+        # Clear markers; no Y/N output requested
+        sample_ws.cell(row=sample_row, column=_index_from_letter(CHECK_PRIMERS_COL)).value = ""
+        sample_ws.cell(row=sample_row, column=_index_from_letter(CHECK_LABCODES_COL)).value = ""
+
+    out_path = output_dir / f"{run}_{date}.xlsx"
+    wb.save(out_path)
+    wb.close()
+    return out_path
+
+
+def run_export(source_folder: str, output_folder: str, template_file: str) -> List[Path]:
     """
+    Entry point for the combie UI.
+    - source_folder: folder containing metadata_*.xlsx files
+    - output_folder: destination folder (created if missing)
+    - template_file: Excel template to copy & fill
+    Returns list of generated file paths.
+    """
+    src, out, tpl = _validate_inputs(source_folder, output_folder, template_file)
 
-    src = get_source_path(source_dir)
-    out = get_output_path(output_dir)
-    files = find_metadata_files(src)
-    groups = group_by_run_date(files)
+    files = _iter_metadata_files(src)
+    if not files:
+        raise FileNotFoundError("No matching metadata files found in source_folder.")
 
-    if not groups:
-        raise FileNotFoundError("Không tìm thấy file metadata hợp lệ trong thư mục nguồn.")
+    groups = _group_by_run_date(files)
+    outputs: List[Path] = []
 
-    outputs: list[Path] = []
     for (run, date), paths in groups.items():
-        sheet_names = _collect_sheet_names(paths)
-        combined: dict[str, pd.DataFrame] = {}
-        for sheet in sheet_names:
-            frames = _load_sheet_frames(paths, sheet)
-            if not frames:
-                continue
-            combined[sheet] = _merge_frames(frames, sheet)
+        group_rows: List[Dict[str, object]] = []
+        for p in paths:
+            group_rows.extend(_read_sample_rows(p))
 
-        dest = out / build_output_filename(run, date)
-        _write_workbook(dest, combined)
-        outputs.append(dest)
+        if not group_rows:
+            # If no rows, still emit an empty data section but preserve template
+            out_path = out / f"{run}_{date}.xlsx"
+            wb = load_workbook(tpl, data_only=False)
+            wb.save(out_path)
+            wb.close()
+            outputs.append(out_path)
+            continue
+
+        out_path = _write_group(run, date, group_rows, tpl, out)
+        outputs.append(out_path)
 
     return outputs
-
-
-__all__.extend([
-    "combine_metadata_by_filename",
-])
-

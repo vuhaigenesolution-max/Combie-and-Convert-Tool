@@ -13,7 +13,7 @@ ROOT_DIR = Path(__file__).resolve().parents[1]
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
-from Backend.Funtion_Combie_Data import combine_metadata_by_filename  # type: ignore
+from Backend.Funtion_Combie_Data import run_export  # type: ignore
 
 
 class CombineFrame(ttk.Frame):
@@ -112,8 +112,19 @@ class CombineFrame(ttk.Frame):
             messagebox.showwarning("Missing input", "Please provide source and output paths before starting.")
             return
 
+        template = self.template_var.get().strip()
+
+        if not template:
+            messagebox.showwarning("Missing input", "Please provide a template file before starting.")
+            return
+        tpl_path = Path(template)
+        if not tpl_path.is_file():
+            messagebox.showwarning("Invalid template", "Template path must be an existing file.")
+            return
+
         self._save_settings({
             "source": source,
+            "template": template,
             "output": output,
         })
 
@@ -126,17 +137,17 @@ class CombineFrame(ttk.Frame):
 
         self._worker_thread = threading.Thread(
             target=self._combine_worker,
-            args=(source, output),
+            args=(source, output, template),
             daemon=True,
         )
         self._worker_thread.start()
         self.after(100, self._poll_events)
 
-    def _combine_worker(self, source: str, output: str) -> None:
+    def _combine_worker(self, source: str, output: str, template: str) -> None:
         try:
             # Simple progress hooks: start, run combine, finish.
             self._event_queue.put(("progress", 10))
-            results = combine_metadata_by_filename(source, output)
+            results = run_export(source, output, template)
             # If needed, you can check results/errors here.
             self._event_queue.put(("progress", 90))
             self._event_queue.put(("done", output))
