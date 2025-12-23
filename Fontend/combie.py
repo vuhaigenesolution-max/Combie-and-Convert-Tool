@@ -179,6 +179,17 @@ class CombineFrame(ttk.Frame):
         self.combine_btn.state(["!disabled"])
         if success:
             self.open_btn.pack(side=tk.LEFT, padx=(0, 0))
+            # Auto-link combine output to Convert screen input folder
+            convert_frame = self.controller.frames.get("convert") if hasattr(self.controller, "frames") else None
+            if convert_frame:
+                output_path = self.output_path_var.get()
+                convert_frame.input_folder_var.set(output_path)
+                # Persist convert settings with new input folder, keep previous output if any
+                convert_frame._save_settings({
+                    "input_file": convert_frame.input_file_var.get().strip(),
+                    "input_folder": output_path,
+                    "output": convert_frame.output_var.get().strip(),
+                })
         if success:
             messagebox.showinfo("Success", message)
         else:

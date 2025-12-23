@@ -8,6 +8,8 @@ import tkinter as tk
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
+from Backend.ConvertoCSV import convert_path
+
 
 class ConvertFrame(ttk.Frame):
     """Screen for converting data with file or folder workflows."""
@@ -26,6 +28,7 @@ class ConvertFrame(ttk.Frame):
         self.input_file_var = tk.StringVar()
         self.input_folder_var = tk.StringVar()
         self.output_var = tk.StringVar()
+        self.combie_duo_var = tk.BooleanVar(value=True)
 
         self._load_settings()
         self._build_ui()
@@ -54,7 +57,7 @@ class ConvertFrame(ttk.Frame):
 
         # Action buttons for file vs. folder conversion.
         action_row = ttk.Frame(form)
-        action_row.grid(row=3, column=0, columnspan=3, pady=(24, 12), sticky="w")
+        action_row.grid(row=3, column=0, columnspan=3, pady=(24, 6), sticky="w")
         self.convert_file_btn = ttk.Button(
             action_row,
             text="Convert File",
@@ -71,9 +74,20 @@ class ConvertFrame(ttk.Frame):
         )
         self.convert_folder_btn.pack(side=tk.LEFT)
 
+        # Options
+        options_row = ttk.Frame(form)
+        options_row.grid(row=4, column=0, columnspan=3, pady=(6, 12), sticky="w")
+        ttk.Checkbutton(
+            options_row,
+            text="Combie duo (SampleImport + Aviti Manifest)",
+            variable=self.combie_duo_var,
+            onvalue=True,
+            offvalue=False,
+        ).pack(side=tk.LEFT)
+
         # Progress section.
         progress_row = ttk.Frame(form)
-        progress_row.grid(row=4, column=0, columnspan=3, pady=(10, 10), sticky="we")
+        progress_row.grid(row=5, column=0, columnspan=3, pady=(10, 10), sticky="we")
         form.columnconfigure(1, weight=1)
         ttk.Label(progress_row, text="Progress:").pack(side=tk.LEFT, padx=(0, 8))
         self.progress = ttk.Progressbar(progress_row, variable=self.progress_var, maximum=100)
@@ -83,7 +97,7 @@ class ConvertFrame(ttk.Frame):
 
         # Output row with open-folder helper.
         result_row = ttk.Frame(form)
-        result_row.grid(row=5, column=0, columnspan=3, pady=(20, 0), sticky="we")
+        result_row.grid(row=6, column=0, columnspan=3, pady=(20, 0), sticky="we")
         ttk.Label(result_row, text="Output:").pack(side=tk.LEFT, padx=(0, 8))
         self.output_path_display = ttk.Entry(result_row, textvariable=self.output_path_var, state="readonly")
         self.output_path_display.pack(side=tk.LEFT, fill=tk.X, expand=True)
@@ -135,10 +149,14 @@ class ConvertFrame(ttk.Frame):
             messagebox.showwarning("Missing input", "Please provide input and output paths before starting.")
             return
 
+        input_path_obj = Path(input_path)
+        output_path_obj = Path(output)
+
         self._save_settings({
             "input_file": self.input_file_var.get().strip(),
             "input_folder": self.input_folder_var.get().strip(),
             "output": output,
+            "combie_duo": self.combie_duo_var.get(),
         })
 
         self.progress_var.set(0)
@@ -150,21 +168,32 @@ class ConvertFrame(ttk.Frame):
 
         self._worker_thread = threading.Thread(
             target=self._convert_worker,
-            args=(mode, input_path, output),
+            args=(mode, input_path_obj, output_path_obj),
             daemon=True,
         )
         self._worker_thread.start()
         self.after(100, self._poll_events)
 
-    def _convert_worker(self, mode: str, input_path: str, output: str) -> None:
+    def _convert_worker(self, mode: str, input_path: Path, output_path: Path) -> None:
         try:
-            steps = 20
-            for i in range(steps + 1):
-                time.sleep(0.1)
-                progress = (i / steps) * 100
-                self._event_queue.put(("progress", progress))
+            # Default sheet/start-row for combie outputs
+            sheet = "SampleImport"
+            start_row = 24
+            combie_duo = self.combie_duo_var.get()
 
-            self._event_queue.put(("done", output, mode))
+            def progress_cb(pct: float) -> None:
+                self._event_queue.put(("progress", pct))
+
+            convert_path(
+                input_path=input_path,
+                output_dir=output_path,
+                sheet=sheet,
+                start_row=start_row,
+                progress_cb=progress_cb,
+                combie_duo=combie_duo,
+            )
+
+            self._event_queue.put(("done", str(output_path), mode))
         except Exception as exc:  # pragma: no cover - defensive UI error handling
             self._event_queue.put(("error", str(exc)))
 
@@ -234,6 +263,7 @@ class ConvertFrame(ttk.Frame):
             self.input_file_var.set(convert.get("input_file", ""))
             self.input_folder_var.set(convert.get("input_folder", ""))
             self.output_var.set(convert.get("output", ""))
+            self.combie_duo_var.set(convert.get("combie_duo", True))
         except Exception:
             pass
 

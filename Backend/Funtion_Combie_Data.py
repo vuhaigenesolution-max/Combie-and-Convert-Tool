@@ -1,5 +1,4 @@
 from __future__ import annotations
-
 from pathlib import Path
 import re
 from typing import Dict, List, Tuple
@@ -201,7 +200,10 @@ def _write_group(run: str, date: str, rows: List[Dict[str, object]], template_fi
         # Write mapped columns on Sample sheet
         for src_col, dst_col in COLUMN_MAP.items():
             val = record.get(src_col)
-            sample_ws.cell(row=sample_row, column=_index_from_letter(dst_col)).value = val
+            cell = sample_ws.cell(row=sample_row, column=_index_from_letter(dst_col))
+            cell.value = val
+            if dst_col == "I":
+                cell.number_format = "DD/MM/YYYY"
 
         # Fill formula in col K to lookup i7 index from Primers (col T)
         sample_ws.cell(row=sample_row, column=_index_from_letter("K")).value = (
