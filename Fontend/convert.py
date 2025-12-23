@@ -8,9 +8,6 @@ import tkinter as tk
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
-from Backend.ConvertoCSV import convert_path
-
-
 class ConvertFrame(ttk.Frame):
     """Screen for converting data with file or folder workflows."""
 
