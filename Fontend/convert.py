@@ -1,3 +1,4 @@
+import csv
 import json
 import os
 import queue
@@ -7,6 +8,83 @@ import time
 import tkinter as tk
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
+from typing import Callable, Iterable, List
+
+from openpyxl import load_workbook
+
+
+def _row_is_empty(row: Iterable[object | None]) -> bool:
+    return all(cell is None or (isinstance(cell, str) and cell.strip() == "") for cell in row)
+
+
+def convert_path(
+    input_path: Path,
+    output_dir: Path,
+    sheet: str,
+    start_row: int,
+    progress_cb: Callable[[float], None] | None = None,
+    combie_duo: bool = True,
+) -> List[Path]:
+    """Convert a single Excel file or every Excel file in a folder to CSV outputs.
+
+    The primary export targets the given ``sheet`` starting at ``start_row``.
+    When ``combie_duo`` is True, an additional export of the "Aviti Manifest"
+    sheet (starting at row 16) is produced for each workbook.
+    """
+
+    if not input_path.exists():
+        raise FileNotFoundError(f"Input path not found: {input_path}")
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    work_items: List[Path]
+    if input_path.is_dir():
+        work_items = [p for p in sorted(input_path.glob("*.xlsx")) if not p.name.startswith("~$")]
+    else:
+        work_items = [input_path]
+
+    if not work_items:
+        raise FileNotFoundError("No .xlsx files found to convert.")
+
+    outputs: List[Path] = []
+    total_exports = len(work_items) * (2 if combie_duo else 1)
+    completed = 0
+
+    def notify_progress() -> None:
+        if progress_cb and total_exports:
+            pct = min(100.0, max(0.0, (completed / total_exports) * 100.0))
+            progress_cb(pct)
+
+    for workbook_path in work_items:
+        wb = load_workbook(workbook_path, data_only=True)
+        targets = [(sheet, start_row)]
+        if combie_duo:
+            targets.append(("Aviti Manifest", 16))
+
+        for sheet_name, first_row in targets:
+            if sheet_name not in wb.sheetnames:
+                wb.close()
+                raise ValueError(f"Sheet '{sheet_name}' not found in {workbook_path.name}")
+
+            ws = wb[sheet_name]
+            out_file = output_dir / f"{workbook_path.stem}_{sheet_name.replace(' ', '_')}.csv"
+            with out_file.open("w", newline="", encoding="utf-8") as fh:
+                writer = csv.writer(fh)
+                for row in ws.iter_rows(min_row=first_row, values_only=True):
+                    if _row_is_empty(row):
+                        break
+                    writer.writerow([cell if cell is not None else "" for cell in row])
+
+            outputs.append(out_file)
+            completed += 1
+            notify_progress()
+
+        wb.close()
+
+    if progress_cb:
+        progress_cb(100.0)
+
+    return outputs
 
 class ConvertFrame(ttk.Frame):
     """Screen for converting data with file or folder workflows."""
